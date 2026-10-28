@@ -1,0 +1,646 @@
+--[[rscripts:analytics:start]]
+task.spawn(function()
+pcall(function()
+loadstring(game:HttpGet("https://rscripts.net/api/telemetry/v2/client.lua?s=6ade7d8391f0da85692ce6b0"))()
+end)
+end)
+--[[rscripts:analytics:end]]
+
+-- LocalScript ใน StarterPlayerScripts
+-- =========================================================
+-- ระบบ AutoKill ซอมบี้ (ใน HoodLocal) - หัว (HEAD) + เล็งขวาอัตโนมัติ + ซ่อนชื่อ + จัดหมวดหมู่
+-- =========================================================
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Players   = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local VIM       = game:GetService("VirtualInputManager")
+local UIS       = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+
+-- ===== การตั้งค่า (CONFIG) =====
+local CONFIG = {
+ENABLED         = true,
+MAX_DISTANCE    = 1000,
+AIM_OFFSET      = Vector3.new(0, 0, 0),
+AIM_PART_NAME   = "Head",
+WEAPON_KEY      = Enum.KeyCode.Two,
+SPAM_KEY        = Enum.KeyCode.E,
+ACTIVATION_KEY  = Enum.KeyCode.F,
+WEAPON_CHECK    = 0.5,
+MONEY_GAINED    = 0,
+SHOT_DELAY      = 0.08,
+BURST_SIZE      = 3,
+BURST_PAUSE     = 0.25,
+AIM_STRICT      = 0.97,
+RIGHT_HOLD      = true,   -- คลิกขวาค้างไว้อัตโนมัติ
+HIDE_NAME       = false,  -- สถานะการซ่อนชื่อ
+}
+
+local state = {
+firing       = false,
+toggleMode   = true,
+waitingFor   = nil,
+lastShot     = 0,
+shotsInBurst = 0,
+lastBurst    = 0,
+rightHeld    = false,  -- สถานะการกดคลิกขวา
+}
+
+-- =========================================================
+-- HOODLOCAL
+-- =========================================================
+local hoodLocal = Workspace:WaitForChild("HoodLocal", 10)
+if not hoodLocal then
+warn("[AutoKillZ] ไม่พบ HoodLocal ใน Workspace")
+return
+end
+
+print("[AutoKillZ] พบ HoodLocal :", hoodLocal:GetFullName())
+
+local function getZombies()
+local list = {}
+for _, obj in ipairs(hoodLocal:GetChildren()) do
+if obj:IsA("Model") and string.match(string.lower(obj.Name), "^zombie") then
+table.insert(list, obj)
+end
+end
+return list
+end
+
+-- ===== ตรวจสอบระบบเงิน =====
+local function getMoney()
+local leaderstats = player:FindFirstChild("leaderstats")
+if leaderstats then
+for _, stat in ipairs(leaderstats:GetChildren()) do
+if stat:IsA("IntValue") or stat:IsA("NumberValue") then
+local n = string.lower(stat.Name)
+if string.find(n, "cash") or string.find(n, "money")
+or string.find(n, "coin") or string.find(n, "argent")
+or string.find(n, "dollar") then
+return stat.Value
+end
+end
+end
+end
+for _, attrName in ipairs({"Money","Cash","Coins","Argent","Dollars"}) do
+local ok, val = pcall(function() return player:GetAttribute(attrName) end)
+if ok and typeof(val) == "number" then return val end
+end
+return nil
+end
+
+local moneyStart = getMoney() or 0
+local lastMoney  = moneyStart
+
+-- =========================================================
+-- ฟังก์ชันซ่อนชื่อ (Hide Name แบบเจาะลึก)
+-- =========================================================
+local function applyHideName(character)
+if not character then return end
+
+local humanoid = character:FindFirstChildOfClass("Humanoid")
+if humanoid then
+if CONFIG.HIDE_NAME then
+humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+else
+humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer
+end
+end
+
+-- วนลูปเช็คและซ่อน BillboardGui / ป้ายชื่อทั้งหมดที่ติดอยู่บนตัวละคร
+for _, descendant in ipairs(character:GetDescendants()) do
+if descendant:IsA("BillboardGui") then
+descendant.Enabled = not CONFIG.HIDE_NAME
+end
+end
+end
+
+local function setupCharacter(char)
+applyHideName(char)
+char.DescendantAdded:Connect(function(descendant)
+if CONFIG.HIDE_NAME and descendant:IsA("BillboardGui") then
+descendant.Enabled = false
+end
+end)
+end
+
+-- =========================================================
+-- RAYFIELD UI (จัดหมวดหมู่ใหม่)
+-- =========================================================
+local Window = Rayfield:CreateWindow({
+Name = "project by Waan ลิง",
+LoadingTitle = "ระบบยิงซอมบี้อัตโนมัติ",
+LoadingSubtitle = "ยิงหัว + กดคลิกขวาเล็งอัตโนมัติ",
+ShowText = "AZ",
+Theme = "Default",
+ToggleUIKeybind = "K",
+ConfigurationSaving = { Enabled = false, FolderName = nil, FileName = "AZCfg" },
+Discord = { Enabled = false, Invite = "x", RememberJoins = false },
+KeySystem = false,
+KeySettings = { Title = "x", Subtitle = "x", Note = "", FileName = "k", SaveKey = false, GrabKeyFromSite = false, Key = {"x"} },
+})
+
+-- จัดหมวดหมู่เมนู
+local TabMain   = Window:CreateTab("หน้าหลัก (Main)", 4483362458)
+local TabCombat = Window:CreateTab("การต่อสู้และการเล็ง (Combat)", 4483362458)
+local TabVisual = Window:CreateTab("การแสดงผล (Visual)", 4483362458)
+local TabKeys   = Window:CreateTab("ตั้งค่าปุ่มกด (Settings)", 4483362458)
+local TabDbg    = Window:CreateTab("ดีบักระบบ (Debug)", 4483362458)
+
+-- =========================================================
+-- 1. หมวดหมู่: หน้าหลัก (Main)
+-- =========================================================
+TabMain:CreateSection("การควบคุมหลัก", false)
+
+TabMain:CreateToggle({
+Name = "เปิดใช้งานสคริปต์",
+CurrentValue = true,
+Flag = "AZ_Enabled",
+Callback = function(v)
+CONFIG.ENABLED = v
+if not v then
+state.firing = false
+if state.rightHeld then
+VIM:SendMouseButtonEvent(0, 0, 1, false, game, 0)
+state.rightHeld = false
+end
+end
+end,
+})
+
+TabMain:CreateToggle({
+Name = "โหมดกดสลับ (F = เปิด/ปิด)",
+CurrentValue = true,
+Flag = "AZ_Toggle",
+Callback = function(v) state.toggleMode = v end,
+})
+
+TabMain:CreateSection("สถานะและข้อมูล", false)
+
+local zombieCountLabel = TabMain:CreateLabel("จำนวนซอมบี้ในพื้นที่ : 0", nil)
+local moneyLabel       = TabMain:CreateLabel("เงินที่ได้รับ : 0", nil)
+local statusLabel      = TabMain:CreateLabel("สถานะ : พร้อมใช้งาน (กด F)", nil)
+
+TabMain:CreateSection("คำสั่งด่วน", false)
+
+TabMain:CreateButton({
+Name = "บังคับถืออาวุธ",
+Interact = 'กดใช้งาน',
+Callback = function()
+VIM:SendKeyEvent(true, CONFIG.WEAPON_KEY, false, game)
+task.wait(0.03)
+VIM:SendKeyEvent(false, CONFIG.WEAPON_KEY, false, game)
+end,
+})
+
+TabMain:CreateButton({
+Name = "รีเซ็ตตัวนับเงินที่ได้รับ",
+Interact = 'กดใช้งาน',
+Callback = function()
+CONFIG.MONEY_GAINED = 0
+moneyStart = getMoney() or 0
+lastMoney = moneyStart
+pcall(function() moneyLabel:Set("เงินที่ได้รับ : 0") end)
+end,
+})
+
+-- =========================================================
+-- 2. หมวดหมู่: การต่อสู้และการเล็ง (Combat & Aim)
+-- =========================================================
+TabCombat:CreateSection("การตั้งค่าระยะและการเล็ง", false)
+
+TabCombat:CreateSlider({
+Name = "ระยะยิงสูงสุด",
+Range = {10, 3000}, Increment = 10, Suffix = " studs",
+CurrentValue = 1000, Flag = "AZ_Dist",
+Callback = function(v) CONFIG.MAX_DISTANCE = v end,
+})
+
+TabCombat:CreateToggle({
+Name = "กดคลิกขวาค้างไว้อัตโนมัติ",
+Info = "จะทำการกดคลิกขวา (เล็งเป้า) ค้างไว้ตลอดเวลาที่มีซอมบี้อยู่ในระยะ",
+CurrentValue = true,
+Flag = "AZ_RightHold",
+Callback = function(v)
+CONFIG.RIGHT_HOLD = v
+if not v and state.rightHeld then
+VIM:SendMouseButtonEvent(0, 0, 1, false, game, 0)
+state.rightHeld = false
+end
+end,
+})
+
+TabCombat:CreateDropdown({
+Name = "ชิ้นส่วนร่างกายที่ต้องการเล็ง",
+Options = {"Head", "UpperTorso", "HumanoidRootPart"},
+CurrentOption = {"Head"},
+Flag = "AZ_AimPart",
+Callback = function(option)
+local opt = option
+if type(option) == "table" then opt = option[1] end
+CONFIG.AIM_PART_NAME = opt
+print("[AutoKillZ] เปลี่ยนตำแหน่งเล็งเป็น :", opt)
+end,
+})
+
+TabCombat:CreateSection("ระบบการยิงเป็นชุด (Burst)", false)
+
+TabCombat:CreateSlider({
+Name = "ระยะเวลาหน่วงระหว่างนัด", Range = {40, 300}, Increment = 10, Suffix = " ms",
+CurrentValue = 80, Flag = "AZ_ShotDelay",
+Callback = function(v) CONFIG.SHOT_DELAY = v / 1000 end,
+})
+
+TabCombat:CreateSlider({
+Name = "จำนวนกระสุนต่อการยิงหนึ่งชุด", Range = {1, 10}, Increment = 1, Suffix = " นัด",
+CurrentValue = 3, Flag = "AZ_BurstSize",
+Callback = function(v) CONFIG.BURST_SIZE = v end,
+})
+
+TabCombat:CreateSlider({
+Name = "ระยะเวลาพักระหว่างชุดยิง", Range = {100, 1000}, Increment = 25, Suffix = " ms",
+CurrentValue = 250, Flag = "AZ_BurstPause",
+Callback = function(v) CONFIG.BURST_PAUSE = v / 1000 end,
+})
+
+TabCombat:CreateSlider({
+Name = "ความตรงของเป้าเล็ง (Strictness)", Range = {85, 100}, Increment = 1, Suffix = "%",
+CurrentValue = 97, Flag = "AZ_AimStrict",
+Callback = function(v) CONFIG.AIM_STRICT = v / 100 end,
+})
+
+-- =========================================================
+-- 3. หมวดหมู่: การแสดงผล (Visual)
+-- =========================================================
+TabVisual:CreateSection("การปรับแต่งการแสดงผลตัวละคร", false)
+
+TabVisual:CreateToggle({
+Name = "ซ่อนชื่อเหนือหัวตัวละคร (Hide Name)",
+Info = "ซ่อนป้ายชื่อ เลือด และยศ ของตัวละครคุณไม่ให้คนอื่นมองเห็น",
+CurrentValue = false,
+Flag = "AZ_HideName",
+Callback = function(v)
+CONFIG.HIDE_NAME = v
+if player.Character then
+applyHideName(player.Character)
+end
+end,
+})
+
+-- =========================================================
+-- 4. หมวดหมู่: ตั้งค่าปุ่มกด (Settings)
+-- =========================================================
+TabKeys:CreateSection("กำหนดปุ่มคีย์บอร์ด", false)
+
+local weaponKeyBtn = TabKeys:CreateButton({
+Name = "ปุ่มเปลี่ยนอาวุธ : [" .. CONFIG.WEAPON_KEY.Name .. "]",
+Interact = 'กดเพื่อเปลี่ยน',
+Callback = function()
+state.waitingFor = "weapon"
+weaponKeyBtn:Set("ปุ่มเปลี่ยนอาวุธ : [กรุณากดปุ่มที่ต้องการ...]")
+end,
+})
+
+local spamKeyBtn = TabKeys:CreateButton({
+Name = "ปุ่มสแปมสกิล/แอคชัน : [" .. CONFIG.SPAM_KEY.Name .. "]",
+Interact = 'กดเพื่อเปลี่ยน',
+Callback = function()
+state.waitingFor = "spam"
+spamKeyBtn:Set("ปุ่มสแปมสกิล/แอคชัน : [กรุณากดปุ่มที่ต้องการ...]")
+end,
+})
+
+local activationKeyBtn = TabKeys:CreateButton({
+Name = "ปุ่มเปิด/ปิดการทำงาน : [" .. CONFIG.ACTIVATION_KEY.Name .. "]",
+Interact = 'กดเพื่อเปลี่ยน',
+Callback = function()
+state.waitingFor = "activation"
+activationKeyBtn:Set("ปุ่มเปิด/ปิดการทำงาน : [กรุณากดปุ่มที่ต้องการ...]")
+end,
+})
+
+TabKeys:CreateSlider({
+Name = "ความถี่การตรวจสอบอาวุธ",
+Range = {100, 2000}, Increment = 100, Suffix = " ms",
+CurrentValue = 500, Flag = "AZ_WCheck",
+Callback = function(v) CONFIG.WEAPON_CHECK = v / 1000 end,
+})
+
+-- =========================================================
+-- 5. หมวดหมู่: ดีบักระบบ (Debug)
+-- =========================================================
+TabDbg:CreateSection("เครื่องมือตรวจสอบข้อมูล", false)
+
+TabDbg:CreateButton({
+Name = "แสดง รายชื่อซอมบี้ + หัว (ใน Console)",
+Interact = 'กดใช้งาน',
+Callback = function()
+print("=== รายชื่อวัตถุใน HOODLOCAL ===")
+local all = getZombies()
+print("จำนวนซอมบี้ทั้งหมด:", #all)
+for _, z in ipairs(all) do
+local head = z:FindFirstChild("Head")
+local hum  = z:FindFirstChildOfClass("Humanoid")
+print(string.format("  %s | หัว=%s | ตำแหน่งหัว=%s | เลือด=%s",
+z.Name,
+tostring(head ~= nil),
+head and tostring(head.Position) or "?",
+hum and tostring(hum.Health) or "?"
+))
+end
+end,
+})
+
+-- =========================================================
+-- การรับค่าอินพุตจากผู้ใช้ (INPUT HANDLING)
+-- =========================================================
+UIS.InputBegan:Connect(function(input, gp)
+if gp then return end
+if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+if state.waitingFor then
+    if state.waitingFor == "weapon" then
+        CONFIG.WEAPON_KEY = input.KeyCode
+        weaponKeyBtn:Set("ปุ่มเปลี่ยนอาวุธ : [" .. input.KeyCode.Name .. "]")
+    elseif state.waitingFor == "spam" then
+        CONFIG.SPAM_KEY = input.KeyCode
+        spamKeyBtn:Set("ปุ่มสแปมสกิล/แอคชัน : [" .. input.KeyCode.Name .. "]")
+    elseif state.waitingFor == "activation" then
+        CONFIG.ACTIVATION_KEY = input.KeyCode
+        activationKeyBtn:Set("ปุ่มเปิด/ปิดการทำงาน : [" .. input.KeyCode.Name .. "]")
+    end
+    state.waitingFor = nil
+    return
+end
+
+if input.KeyCode == CONFIG.ACTIVATION_KEY and CONFIG.ENABLED then
+    if state.toggleMode then
+        state.firing = not state.firing
+        state.shotsInBurst = 0
+        print("[AutoKillZ] สถานะระบบ : " .. (state.firing and "เปิดทำงาน" or "ปิดทำงาน"))
+        if not state.firing and state.rightHeld then
+            VIM:SendMouseButtonEvent(0, 0, 1, false, game, 0)
+            state.rightHeld = false
+        end
+    else
+        state.firing = true
+    end
+end
+end)
+
+UIS.InputEnded:Connect(function(input, gp)
+if gp then return end
+if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+if input.KeyCode == CONFIG.ACTIVATION_KEY and not state.toggleMode then
+state.firing = false
+if state.rightHeld then
+VIM:SendMouseButtonEvent(0, 0, 1, false, game, 0)
+state.rightHeld = false
+end
+end
+end)
+
+-- =========================================================
+-- ฟังก์ชั่นการทำงานหลัก (FUNCTIONS)
+-- =========================================================
+local function getAimPart(zombie)
+if not zombie then return nil end
+local part = zombie:FindFirstChild(CONFIG.AIM_PART_NAME)
+if part and part:IsA("BasePart") then return part end
+local fallbacks = {"Head", "UpperTorso", "Torso", "HumanoidRootPart"}
+for _, name in ipairs(fallbacks) do
+local p = zombie:FindFirstChild(name)
+if p and p:IsA("BasePart") then return p end
+end
+return zombie.PrimaryPart
+end
+
+local function isValidZombie(zombie)
+if not zombie or not zombie:IsA("Model") then return false end
+local hum = zombie:FindFirstChildOfClass("Humanoid")
+if not hum or hum.Health <= 0 then return false end
+local aimPart = getAimPart(zombie)
+if not aimPart then return false end
+return true, aimPart, hum
+end
+
+local function hasLineOfSight(origin, targetPos)
+local myChar = player.Character
+if not myChar then return false end
+
+local rp = RaycastParams.new()
+rp.FilterDescendantsInstances = {myChar, hoodLocal}
+rp.FilterType = Enum.RaycastFilterType.Exclude
+
+local res = Workspace:Raycast(origin, targetPos - origin, rp)
+if not res then return true end
+local hm = res.Instance:FindFirstAncestorOfClass("Model")
+if hm and hm:FindFirstChildOfClass("Humanoid") then return true end
+return false
+end
+
+local function getAllZombies()
+local myChar = player.Character
+if not myChar then return {} end
+local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+if not myRoot then return {} end
+
+local list = {}
+for _, zombie in ipairs(getZombies()) do
+    local valid, aimPart, hum = isValidZombie(zombie)
+    if valid and aimPart then
+        local dist = (myRoot.Position - aimPart.Position).Magnitude
+        if dist <= CONFIG.MAX_DISTANCE then
+            table.insert(list, {
+                aimPart = aimPart,
+                model = zombie,
+                hum = hum,
+                dist = dist,
+            })
+        end
+    end
+end
+table.sort(list, function(a, b) return a.dist < b.dist end)
+return list
+end
+
+local function spamKey()
+VIM:SendKeyEvent(true, CONFIG.SPAM_KEY, false, game)
+task.wait(0.01)
+VIM:SendKeyEvent(false, CONFIG.SPAM_KEY, false, game)
+end
+
+local function hasToolEquipped()
+local myChar = player.Character
+if not myChar then return false end
+for _, c in ipairs(myChar:GetChildren()) do
+if c:IsA("Tool") then return true end
+end
+return false
+end
+
+local function forceEquipWeapon()
+if not CONFIG.ENABLED then return end
+if hasToolEquipped() then return end
+VIM:SendKeyEvent(true, CONFIG.WEAPON_KEY, false, game)
+task.wait(0.03)
+VIM:SendKeyEvent(false, CONFIG.WEAPON_KEY, false, game)
+end
+
+-- =========================================================
+-- การจัดการการกดคลิกขวา (เล็งเป้าค้าง)
+-- =========================================================
+local function holdRightClick()
+if CONFIG.RIGHT_HOLD and not state.rightHeld then
+VIM:SendMouseButtonEvent(0, 0, 1, true, game, 0)
+state.rightHeld = true
+end
+end
+
+local function releaseRightClick()
+if state.rightHeld then
+VIM:SendMouseButtonEvent(0, 0, 1, false, game, 0)
+state.rightHeld = false
+end
+end
+
+-- =========================================================
+-- ลูปการทำงานหลัก (MAIN LOOPS)
+-- =========================================================
+task.spawn(function()
+while true do
+task.wait(CONFIG.WEAPON_CHECK)
+forceEquipWeapon()
+end
+end)
+
+task.spawn(function()
+while true do
+task.wait(1)
+local current = getMoney()
+if current then
+if lastMoney == nil then
+lastMoney = current
+moneyStart = current
+end
+if current > lastMoney then
+CONFIG.MONEY_GAINED = CONFIG.MONEY_GAINED + (current - lastMoney)
+pcall(function() moneyLabel:Set("เงินที่ได้รับ : " .. CONFIG.MONEY_GAINED) end)
+end
+lastMoney = current
+end
+end
+end)
+
+task.spawn(function()
+while true do
+task.wait(0.03)
+
+    local list = getAllZombies()
+    pcall(function() zombieCountLabel:Set("จำนวนซอมบี้ในพื้นที่ : " .. #list) end)
+
+    if not CONFIG.ENABLED or not state.firing then
+        releaseRightClick()
+        pcall(function()
+            if not CONFIG.ENABLED then
+                statusLabel:Set("สถานะ : ปิดใช้งานสคริปต์")
+            else
+                statusLabel:Set("สถานะ : พร้อมใช้งาน (กด F)")
+            end
+        end)
+        state.shotsInBurst = 0
+        continue
+    end
+
+    local myChar = player.Character
+    if not myChar or not myChar:FindFirstChildOfClass("Humanoid") then
+        releaseRightClick()
+        continue
+    end
+    if myChar.Humanoid.Health <= 0 then
+        releaseRightClick()
+        continue
+    end
+
+    if #list == 0 then
+        releaseRightClick()
+        pcall(function() statusLabel:Set("สถานะ : ไม่พบซอมบี้ใน HoodLocal") end)
+        continue
+    end
+
+    local bestTarget, bestDist = nil, math.huge
+    for _, entry in ipairs(list) do
+        local aimPos = entry.aimPart.Position + CONFIG.AIM_OFFSET
+        if hasLineOfSight(camera.CFrame.Position, aimPos) and entry.dist < bestDist then
+            bestDist = entry.dist
+            bestTarget = entry
+        end
+    end
+
+    if not bestTarget then
+        releaseRightClick()
+        pcall(function() statusLabel:Set("สถานะ : ซอมบี้อยู่นอกสายตา / มีสิ่งกีดขวาง") end)
+        continue
+    end
+
+    if bestTarget.hum.Health <= 0 then
+        state.shotsInBurst = 0
+        continue
+    end
+
+    holdRightClick()
+
+    if tick() - state.lastBurst < CONFIG.BURST_PAUSE then continue end
+    if tick() - state.lastShot  < CONFIG.SHOT_DELAY  then continue end
+
+    local aimPos = bestTarget.aimPart.Position + CONFIG.AIM_OFFSET
+    camera.CFrame = CFrame.new(camera.CFrame.Position, aimPos)
+
+    local camLook = camera.CFrame.LookVector
+    local toTarget = (aimPos - camera.CFrame.Position).Unit
+    local dot = camLook:Dot(toTarget)
+
+    pcall(function()
+        statusLabel:Set(string.format("ยิงหัว - ระยะ %.0f studs | ค่าความตรง %.2f", bestDist, dot))
+    end)
+
+    if dot >= CONFIG.AIM_STRICT and bestTarget.hum.Health > 0 then
+        VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+        task.wait(0.02)
+        VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+        spamKey()
+        state.lastShot = tick()
+        state.shotsInBurst = state.shotsInBurst + 1
+        if state.shotsInBurst >= CONFIG.BURST_SIZE then
+            state.shotsInBurst = 0
+            state.lastBurst = tick()
+        end
+    end
+end
+end)
+
+-- =========================================================
+-- การจัดการตัวละครเกิดใหม่ / เทเลพอร์ต
+-- =========================================================
+player.CharacterAdded:Connect(function(char)
+task.wait(0.5)
+state.firing = false
+state.shotsInBurst = 0
+releaseRightClick()
+setupCharacter(char)
+end)
+
+if player.Character then
+setupCharacter(player.Character)
+end
+
+player.OnTeleport:Connect(function()
+state.firing = false
+releaseRightClick()
+end)
+
+print("[AutoKillZ] สคริปต์เริ่มทำงาน - แก้ไขจุดรันไม่ขึ้นเรียบร้อยแล้ว")
